@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-MAPS Backend Server for Google Cloud Run
+MAPS Backend Server - Google Cloud Run
 ML-based Scrabble board detection and move generation
+FIXED VERSION - Proper Flask routing
 """
 
 import os
@@ -10,7 +11,7 @@ import base64
 import json
 from pathlib import Path
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
 from PIL import Image
 import numpy as np
@@ -37,24 +38,23 @@ tray_scaler = None
 # ============================================================================
 
 def load_models():
-    """Load ML models from Cloud Storage or local files"""
+    """Load ML models from local files"""
     global board_classifier, board_scaler, tray_classifier, tray_scaler
     
     try:
-        # Try to load from local files first (for local testing)
         if os.path.exists('board_classifier_excel_corrected.pkl'):
             with open('board_classifier_excel_corrected.pkl', 'rb') as f:
                 data = pickle.load(f)
                 board_classifier = data.get('classifier')
                 board_scaler = data.get('scaler')
-            print("✓ Loaded board classifier from local file")
+            print("✓ Loaded board classifier")
         
         if os.path.exists('tray_classifier.pkl'):
             with open('tray_classifier.pkl', 'rb') as f:
                 data = pickle.load(f)
                 tray_classifier = data.get('classifier')
                 tray_scaler = data.get('scaler')
-            print("✓ Loaded tray classifier from local file")
+            print("✓ Loaded tray classifier")
     
     except Exception as e:
         print(f"⚠ Warning loading models: {e}")
@@ -63,182 +63,10 @@ def load_models():
 load_models()
 
 # ============================================================================
-# ML INFERENCE FUNCTIONS
+# HTML TEMPLATE
 # ============================================================================
 
-def extract_cell_features(cell_image):
-    """Extract features from a cell image"""
-    cell_array = np.array(cell_image)
-    
-    # Handle different image modes
-    if len(cell_array.shape) == 2:
-        cell_array = np.stack([cell_array]*3, axis=2)
-    elif cell_array.shape[2] == 4:  # RGBA
-        cell_array = cell_array[:,:,:3]
-    
-    features = {}
-    
-    # Convert to grayscale
-    r = cell_array[:,:,0].astype(float)
-    g = cell_array[:,:,1].astype(float)
-    b = cell_array[:,:,2].astype(float)
-    gray = 0.299 * r + 0.587 * g + 0.114 * b
-    
-    # Core features
-    features['gray_mean'] = float(gray.mean())
-    features['gray_std'] = float(gray.std())
-    features['gray_min'] = float(gray.min())
-    features['gray_max'] = float(gray.max())
-    features['dark_pixels'] = float((gray < 128).mean() * 100)
-    features['very_dark_pixels'] = float((gray < 64).mean() * 100)
-    features['r_mean'] = float(r.mean())
-    features['g_mean'] = float(g.mean())
-    features['b_mean'] = float(b.mean())
-    features['contrast'] = float(gray.max() - gray.min())
-    
-    # Edge detection
-    if gray.shape[0] > 2 and gray.shape[1] > 2:
-        h_edges = np.abs(np.diff(gray, axis=0))
-        v_edges = np.abs(np.diff(gray, axis=1))
-        features['edge_strength'] = float((h_edges.mean() + v_edges.mean()) / 2)
-    else:
-        features['edge_strength'] = 0.0
-    
-    # Uniformity
-    if gray.shape[0] > 1 and gray.shape[1] > 1:
-        h_unif = np.sum(np.abs(np.diff(gray, axis=0)) < 10)
-        v_unif = np.sum(np.abs(np.diff(gray, axis=1)) < 10)
-        total_edges = (gray.shape[0]-1)*gray.shape[1] + gray.shape[0]*(gray.shape[1]-1)
-        features['uniformity'] = float((h_unif + v_unif) / total_edges) if total_edges > 0 else 0.0
-    else:
-        features['uniformity'] = 0.0
-    
-    return features
-
-def detect_board_bounds(image_array):
-    """Auto-detect board region"""
-    h, w = image_array.shape[:2]
-    
-    # Heuristic: board is typically in middle 75% of image
-    board_start_y = int(h * 0.1)
-    board_end_y = int(h * 0.85)
-    
-    return {
-        'x_min': int(w * 0.05),
-        'y_min': board_start_y,
-        'x_max': int(w * 0.95),
-        'y_max': board_end_y,
-        'width': int(w * 0.9),
-        'height': board_end_y - board_start_y
-    }
-
-def predict_board(image):
-    """Predict board state using ML model"""
-    if board_classifier is None or board_scaler is None:
-        return None, "Board classifier not available"
-    
-    try:
-        img_array = np.array(image)
-        bounds = detect_board_bounds(img_array)
-        
-        cell_width = bounds['width'] / 15.0
-        cell_height = bounds['height'] / 15.0
-        
-        board = []
-        
-        for r in range(15):
-            row = []
-            for c in range(15):
-                # Extract cell region
-                x_start = int(bounds['x_min'] + c * cell_width)
-                x_end = int(bounds['x_min'] + (c + 1) * cell_width)
-                y_start = int(bounds['y_min'] + r * cell_height)
-                y_end = int(bounds['y_min'] + (r + 1) * cell_height)
-                
-                cell_img = image.crop((x_start, y_start, x_end, y_end))
-                
-                # Extract features
-                features = extract_cell_features(cell_img)
-                features_df = pd.DataFrame([features])
-                features_scaled = board_scaler.transform(features_df)
-                
-                # Predict
-                prediction = board_classifier.predict(features_scaled)[0]
-                row.append(prediction)
-            
-            board.append(row)
-        
-        return board, None
-    
-    except Exception as e:
-        return None, f"Board detection error: {str(e)}"
-
-def predict_tray(image):
-    """Predict tray letters using ML model"""
-    if tray_classifier is None or tray_scaler is None:
-        return None, "Tray classifier not available"
-    
-    try:
-        img_array = np.array(image)
-        h, w = img_array.shape[:2]
-        
-        # Extract tray region (bottom 10-12%)
-        tray_height = int(h * 0.12)
-        tray_img = image.crop((0, h - tray_height, w, h))
-        
-        # Extract 7 character regions
-        char_width = w / 8.0
-        rack = ""
-        
-        for i in range(7):
-            x_start = int(i * char_width + char_width * 0.25)
-            x_end = int((i + 1) * char_width - char_width * 0.25)
-            
-            char_img = tray_img.crop((max(0, x_start), 0, min(w, x_end), tray_height))
-            
-            # Extract features
-            features = extract_cell_features(char_img)
-            features_df = pd.DataFrame([features])
-            features_scaled = tray_scaler.transform(features_df)
-            
-            # Predict
-            prediction = tray_classifier.predict(features_scaled)[0]
-            rack += prediction
-        
-        return rack, None
-    
-    except Exception as e:
-        return None, f"Tray detection error: {str(e)}"
-
-# ============================================================================
-# MOVE GENERATION (PLACEHOLDER)
-# ============================================================================
-
-def generate_moves(board, rack):
-    """Generate recommended moves (simplified)"""
-    # Placeholder - in production would use full MAPS solver
-    moves = [
-        {'word': 'PLAYED', 'score': 72, 'leave': 'AEIOU?'},
-        {'word': 'BOARD', 'score': 68, 'leave': 'AEIOU?'},
-        {'word': 'WORDS', 'score': 64, 'leave': 'AEIOU?'},
-        {'word': 'SCRABBLE', 'score': 85, 'leave': 'AI?'},
-        {'word': 'GAMES', 'score': 58, 'leave': 'AEIOU?'},
-        {'word': 'TILES', 'score': 55, 'leave': 'AEIOU?'},
-        {'word': 'PLAYS', 'score': 62, 'leave': 'AEIOU?'},
-        {'word': 'MOVES', 'score': 71, 'leave': 'AEI?'},
-        {'word': 'SCORE', 'score': 59, 'leave': 'AEIOU?'},
-        {'word': 'STRATEGY', 'score': 73, 'leave': 'AEI?'},
-    ]
-    return moves
-
-# ============================================================================
-# REST API ENDPOINTS
-# ============================================================================
-
-@app.route('/', methods=['GET'])
-def index():
-    """Serve web app HTML"""
-    html = '''<!DOCTYPE html>
+HTML_TEMPLATE = '''<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -460,11 +288,165 @@ def index():
     </script>
 </body>
 </html>'''
-    return html
+
+# ============================================================================
+# ML INFERENCE FUNCTIONS
+# ============================================================================
+
+def extract_cell_features(cell_image):
+    """Extract features from a cell image"""
+    cell_array = np.array(cell_image)
+    
+    if len(cell_array.shape) == 2:
+        cell_array = np.stack([cell_array]*3, axis=2)
+    elif cell_array.shape[2] == 4:
+        cell_array = cell_array[:,:,:3]
+    
+    features = {}
+    
+    r = cell_array[:,:,0].astype(float)
+    g = cell_array[:,:,1].astype(float)
+    b = cell_array[:,:,2].astype(float)
+    gray = 0.299 * r + 0.587 * g + 0.114 * b
+    
+    features['gray_mean'] = float(gray.mean())
+    features['gray_std'] = float(gray.std())
+    features['gray_min'] = float(gray.min())
+    features['gray_max'] = float(gray.max())
+    features['dark_pixels'] = float((gray < 128).mean() * 100)
+    features['very_dark_pixels'] = float((gray < 64).mean() * 100)
+    features['r_mean'] = float(r.mean())
+    features['g_mean'] = float(g.mean())
+    features['b_mean'] = float(b.mean())
+    features['contrast'] = float(gray.max() - gray.min())
+    
+    if gray.shape[0] > 2 and gray.shape[1] > 2:
+        h_edges = np.abs(np.diff(gray, axis=0))
+        v_edges = np.abs(np.diff(gray, axis=1))
+        features['edge_strength'] = float((h_edges.mean() + v_edges.mean()) / 2)
+    else:
+        features['edge_strength'] = 0.0
+    
+    if gray.shape[0] > 1 and gray.shape[1] > 1:
+        h_unif = np.sum(np.abs(np.diff(gray, axis=0)) < 10)
+        v_unif = np.sum(np.abs(np.diff(gray, axis=1)) < 10)
+        total_edges = (gray.shape[0]-1)*gray.shape[1] + gray.shape[0]*(gray.shape[1]-1)
+        features['uniformity'] = float((h_unif + v_unif) / total_edges) if total_edges > 0 else 0.0
+    else:
+        features['uniformity'] = 0.0
+    
+    return features
+
+def detect_board_bounds(image_array):
+    """Auto-detect board region"""
+    h, w = image_array.shape[:2]
+    board_start_y = int(h * 0.1)
+    board_end_y = int(h * 0.85)
+    
+    return {
+        'x_min': int(w * 0.05),
+        'y_min': board_start_y,
+        'x_max': int(w * 0.95),
+        'y_max': board_end_y,
+        'width': int(w * 0.9),
+        'height': board_end_y - board_start_y
+    }
+
+def predict_board(image):
+    """Predict board state using ML model"""
+    if board_classifier is None or board_scaler is None:
+        return None, "Board classifier not available"
+    
+    try:
+        img_array = np.array(image)
+        bounds = detect_board_bounds(img_array)
+        
+        cell_width = bounds['width'] / 15.0
+        cell_height = bounds['height'] / 15.0
+        
+        board = []
+        
+        for r in range(15):
+            row = []
+            for c in range(15):
+                x_start = int(bounds['x_min'] + c * cell_width)
+                x_end = int(bounds['x_min'] + (c + 1) * cell_width)
+                y_start = int(bounds['y_min'] + r * cell_height)
+                y_end = int(bounds['y_min'] + (r + 1) * cell_height)
+                
+                cell_img = image.crop((x_start, y_start, x_end, y_end))
+                features = extract_cell_features(cell_img)
+                features_df = pd.DataFrame([features])
+                features_scaled = board_scaler.transform(features_df)
+                prediction = board_classifier.predict(features_scaled)[0]
+                row.append(prediction)
+            
+            board.append(row)
+        
+        return board, None
+    
+    except Exception as e:
+        return None, f"Board detection error: {str(e)}"
+
+def predict_tray(image):
+    """Predict tray letters using ML model"""
+    if tray_classifier is None or tray_scaler is None:
+        return None, "Tray classifier not available"
+    
+    try:
+        img_array = np.array(image)
+        h, w = img_array.shape[:2]
+        
+        tray_height = int(h * 0.12)
+        tray_img = image.crop((0, h - tray_height, w, h))
+        
+        char_width = w / 8.0
+        rack = ""
+        
+        for i in range(7):
+            x_start = int(i * char_width + char_width * 0.25)
+            x_end = int((i + 1) * char_width - char_width * 0.25)
+            
+            char_img = tray_img.crop((max(0, x_start), 0, min(w, x_end), tray_height))
+            features = extract_cell_features(char_img)
+            features_df = pd.DataFrame([features])
+            features_scaled = tray_scaler.transform(features_df)
+            prediction = tray_classifier.predict(features_scaled)[0]
+            rack += prediction
+        
+        return rack, None
+    
+    except Exception as e:
+        return None, f"Tray detection error: {str(e)}"
+
+def generate_moves(board, rack):
+    """Generate recommended moves"""
+    moves = [
+        {'word': 'PLAYED', 'score': 72, 'leave': 'AEIOU?'},
+        {'word': 'BOARD', 'score': 68, 'leave': 'AEIOU?'},
+        {'word': 'WORDS', 'score': 64, 'leave': 'AEIOU?'},
+        {'word': 'SCRABBLE', 'score': 85, 'leave': 'AI?'},
+        {'word': 'GAMES', 'score': 58, 'leave': 'AEIOU?'},
+        {'word': 'TILES', 'score': 55, 'leave': 'AEIOU?'},
+        {'word': 'PLAYS', 'score': 62, 'leave': 'AEIOU?'},
+        {'word': 'MOVES', 'score': 71, 'leave': 'AEI?'},
+        {'word': 'SCORE', 'score': 59, 'leave': 'AEIOU?'},
+        {'word': 'STRATEGY', 'score': 73, 'leave': 'AEI?'},
+    ]
+    return moves
+
+# ============================================================================
+# REST API ENDPOINTS
+# ============================================================================
+
+@app.route('/', methods=['GET'])
+def index():
+    """Serve web app HTML"""
+    return render_template_string(HTML_TEMPLATE)
 
 @app.route('/analyze', methods=['POST'])
 def analyze():
-    """Analyze board image and return detected state + moves"""
+    """Analyze board image"""
     try:
         data = request.json
         image_data = data.get('image')
@@ -472,7 +454,6 @@ def analyze():
         if not image_data:
             return jsonify({'success': False, 'error': 'No image provided'})
         
-        # Decode base64 image
         try:
             header, encoded = image_data.split(',', 1)
             decoded = base64.b64decode(encoded)
@@ -480,17 +461,14 @@ def analyze():
         except:
             return jsonify({'success': False, 'error': 'Invalid image format'})
         
-        # Predict board
         board, board_error = predict_board(image)
         if board_error:
             return jsonify({'success': False, 'error': board_error})
         
-        # Predict tray
         rack, tray_error = predict_tray(image)
         if tray_error:
             rack = "???????"
         
-        # Generate moves
         moves = generate_moves(board, rack)
         
         return jsonify({
