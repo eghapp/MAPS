@@ -1,0 +1,36 @@
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  # Build the Docker image with --no-cache to prevent stale layers
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '--no-cache'
+      - '-t'
+      - 'us-east5-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/eghapp-maps/maps-git:latest'
+      - '.'
+
+  # Push the image to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'us-east5-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/eghapp-maps/maps-git:latest'
+
+  # Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    args:
+      - 'gcloud'
+      - 'run'
+      - 'deploy'
+      - 'maps-git'
+      - '--image'
+      - 'us-east5-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/eghapp-maps/maps-git:latest'
+      - '--region'
+      - 'us-east5'
+      - '--platform'
+      - 'managed'
+      - '--allow-unauthenticated'
+
+images:
+  - 'us-east5-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/eghapp-maps/maps-git:latest'
