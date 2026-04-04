@@ -1,53 +1,54 @@
 #!/usr/bin/env python3
 """
-Simple script to upload .pkl files to running MAPS instance
-Usage: python upload_models.py <backend_url>
+Upload models and wordlist to the MAPS Cloud Run backend.
+
+Usage (from Google Cloud Shell):
+  # Upload both models:
+  python upload_models.py --url https://maps-git-268170978962.us-east5.run.app \
+      --board board_classifier_v2.pkl --tray tray_classifier_v1.pkl
+
+  # Upload wordlist:
+  python upload_models.py --url https://maps-git-268170978962.us-east5.run.app \
+      --wordlist NWL23.txt
+
+  # Check health:
+  python upload_models.py --url https://maps-git-268170978962.us-east5.run.app --health
 """
-import sys
-import base64
-import requests
+import argparse, requests, sys
 
-if len(sys.argv) < 2:
-    print("Usage: python upload_models.py <backend_url>")
-    print("Example: python upload_models.py https://maps-git-268170978962.us-east5.run.app")
-    sys.exit(1)
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--url", required=True)
+    p.add_argument("--board", default="")
+    p.add_argument("--tray", default="")
+    p.add_argument("--wordlist", default="")
+    p.add_argument("--health", action="store_true")
+    a = p.parse_args()
+    url = a.url.rstrip("/")
 
-backend_url = sys.argv[1].rstrip('/')
+    if a.health:
+        r = requests.get(f"{url}/health", timeout=30)
+        print(f"Health: {r.json()}")
+        return
 
-def upload(model_type, filepath):
-    print(f"\nUploading {model_type}...")
-    try:
-        with open(filepath, 'rb') as f:
-            b64 = base64.b64encode(f.read()).decode('utf-8')
-        
-        resp = requests.post(
-            f'{backend_url}/upload-model',
-            json={'model_type': model_type, 'data': b64},
-            timeout=30
-        )
-        result = resp.json()
-        
-        if result.get('success'):
-            print(f"  ✓ {result['message']}")
-            return True
-        else:
-            print(f"  ✗ Error: {result['error']}")
-            return False
-    except Exception as e:
-        print(f"  ✗ Failed: {e}")
-        return False
+    if a.board or a.tray:
+        files = {}
+        if a.board:
+            files["board_classifier"] = open(a.board, "rb")
+            print(f"Board model: {a.board}")
+        if a.tray:
+            files["tray_classifier"] = open(a.tray, "rb")
+            print(f"Tray model: {a.tray}")
+        r = requests.post(f"{url}/upload_models", files=files, timeout=60)
+        print(f"Models: {r.json()}")
 
-# Upload both models
-success = True
-success &= upload('board', 'board_classifier_excel_corrected.pkl')
-success &= upload('tray', 'tray_classifier.pkl')
+    if a.wordlist:
+        r = requests.post(f"{url}/upload_wordlist",
+                          files={"wordlist": open(a.wordlist, "rb")}, timeout=60)
+        print(f"Wordlist: {r.json()}")
 
-# Check status
-try:
-    resp = requests.get(f'{backend_url}/health', timeout=5)
-    status = resp.json()
-    print(f"\nStatus: {status}")
-except Exception as e:
-    print(f"\nFailed to check status: {e}")
+    r = requests.get(f"{url}/health", timeout=30)
+    print(f"Final: {r.json()}")
 
-sys.exit(0 if success else 1)
+if __name__ == "__main__":
+    main()
