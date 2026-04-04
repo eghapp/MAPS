@@ -1,94 +1,54 @@
 #!/usr/bin/env python3
 """
-MAPS Model Uploader v2
-Uploads .pkl model files to a running MAPS Cloud Backend instance.
+Upload models and wordlist to the MAPS Cloud Run backend.
 
 Usage (from Google Cloud Shell):
-    python upload_models.py <backend_url>
+  # Upload both models:
+  python upload_models.py --url https://maps-git-268170978962.us-east5.run.app \
+      --board board_classifier_v2.pkl --tray tray_classifier_v1.pkl
 
-Example:
-    python upload_models.py https://maps-git-268170978962.us-east5.run.app
+  # Upload wordlist:
+  python upload_models.py --url https://maps-git-268170978962.us-east5.run.app \
+      --wordlist NWL23.txt
+
+  # Check health:
+  python upload_models.py --url https://maps-git-268170978962.us-east5.run.app --health
 """
-import sys
-import os
-import base64
-import requests
+import argparse, requests, sys
 
-if len(sys.argv) < 2:
-    print("Usage: python upload_models.py <backend_url>")
-    print("Example: python upload_models.py https://maps-git-268170978962.us-east5.run.app")
-    sys.exit(1)
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--url", required=True)
+    p.add_argument("--board", default="")
+    p.add_argument("--tray", default="")
+    p.add_argument("--wordlist", default="")
+    p.add_argument("--health", action="store_true")
+    a = p.parse_args()
+    url = a.url.rstrip("/")
 
-backend_url = sys.argv[1].rstrip('/')
+    if a.health:
+        r = requests.get(f"{url}/health", timeout=30)
+        print(f"Health: {r.json()}")
+        return
 
-# --- Step 1: Check health before uploading ---
-print(f"Checking backend at {backend_url} ...")
-try:
-    resp = requests.get(f'{backend_url}/health', timeout=10)
-    resp.raise_for_status()
-    status = resp.json()
-    print(f"  Service: OK (v{status.get('version', '?')})")
-    print(f"  Board model loaded: {status.get('board_model_loaded')}")
-    print(f"  Tray model loaded:  {status.get('tray_model_loaded')}")
-except Exception as e:
-    print(f"  ERROR: Cannot reach backend — {e}")
-    print("  Is the Cloud Run service deployed and running?")
-    sys.exit(1)
+    if a.board or a.tray:
+        files = {}
+        if a.board:
+            files["board_classifier"] = open(a.board, "rb")
+            print(f"Board model: {a.board}")
+        if a.tray:
+            files["tray_classifier"] = open(a.tray, "rb")
+            print(f"Tray model: {a.tray}")
+        r = requests.post(f"{url}/upload_models", files=files, timeout=60)
+        print(f"Models: {r.json()}")
 
+    if a.wordlist:
+        r = requests.post(f"{url}/upload_wordlist",
+                          files={"wordlist": open(a.wordlist, "rb")}, timeout=60)
+        print(f"Wordlist: {r.json()}")
 
-# --- Step 2: Upload models ---
-def upload(model_type, filepath):
-    """Upload a single .pkl model file."""
-    if not os.path.exists(filepath):
-        print(f"\n  SKIP {model_type}: file not found at {filepath}")
-        return False
+    r = requests.get(f"{url}/health", timeout=30)
+    print(f"Final: {r.json()}")
 
-    size_mb = os.path.getsize(filepath) / (1024 * 1024)
-    print(f"\nUploading {model_type} ({size_mb:.1f} MB) from {filepath} ...")
-
-    try:
-        with open(filepath, 'rb') as f:
-            b64 = base64.b64encode(f.read()).decode('utf-8')
-
-        resp = requests.post(
-            f'{backend_url}/upload-model',
-            json={'model_type': model_type, 'data': b64},
-            timeout=60
-        )
-        result = resp.json()
-
-        if result.get('success'):
-            print(f"  OK: {result['message']} ({result.get('model_class', '?')})")
-            return True
-        else:
-            print(f"  FAIL: {result.get('error', 'Unknown error')}")
-            return False
-    except requests.exceptions.Timeout:
-        print(f"  FAIL: Request timed out (file may be too large)")
-        return False
-    except Exception as e:
-        print(f"  FAIL: {e}")
-        return False
-
-
-success = True
-success &= upload('board', 'board_classifier_excel_corrected.pkl')
-success &= upload('tray', 'tray_classifier.pkl')
-
-
-# --- Step 3: Verify final status ---
-print("\n--- Final Status ---")
-try:
-    resp = requests.get(f'{backend_url}/health', timeout=10)
-    status = resp.json()
-    print(f"  Board model loaded: {status.get('board_model_loaded')}")
-    print(f"  Tray model loaded:  {status.get('tray_model_loaded')}")
-
-    if status.get('board_model_loaded') and status.get('tray_model_loaded'):
-        print("\n  ALL MODELS LOADED — backend is ready for /detect")
-    else:
-        print("\n  WARNING: Not all models loaded. Check errors above.")
-except Exception as e:
-    print(f"  Could not verify: {e}")
-
-sys.exit(0 if success else 1)
+if __name__ == "__main__":
+    main()

@@ -1,18 +1,13 @@
 FROM python:3.11-slim
 
-WORKDIR /app
+# Install Tesseract OCR
+RUN apt-get update && apt-get install -y tesseract-ocr && rm -rf /var/lib/apt/lists/*
 
-# Install dependencies first (cached layer)
+WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application file
 COPY main.py .
 
-# Diagnostic: confirm files are present in container
-RUN echo "=== FILES AFTER COPY ===" && ls -la /app/ && echo "=== END FILES ==="
-
-# Expose port for Cloud Run
 EXPOSE 8080
-
-CMD ["python", "main.py"]
+CMD exec gunicorn --bind :$PORT --workers 1 --threads 2 --timeout 120 main:app
