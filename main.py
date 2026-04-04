@@ -327,7 +327,7 @@ input[type=file]{display:none}
 <div id="step1">
 <div class="upload-area">
   <p style="margin-bottom:8px;color:#86868b;font-size:13px">Upload a Crossplay screenshot</p>
-  <input type="file" id="fi" accept="image/*" capture="environment">
+  <input type="file" id="fi" accept="image/*">
   <button class="btn" onclick="document.getElementById('fi').click()">Choose Screenshot</button>
   <img id="pv" class="preview" style="display:none">
 </div>
