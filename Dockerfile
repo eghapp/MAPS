@@ -9,7 +9,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY main.py .
 COPY board_classifier_v2.pkl .
-COPY tray_classifier.pkl .
+COPY tray_classifier_v1.pkl .
 COPY NWL23.txt .
 
 EXPOSE 8080
