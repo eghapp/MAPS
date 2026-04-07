@@ -14,8 +14,13 @@ Endpoints:
 Models are in-memory only. After cold starts or redeployments,
 re-upload via upload_models.py.
 
+Changes in v13 (from v12.1):
+  - Board cells resized to 60x60 before feature extraction (matches v3 model)
+  - Compatible with board_classifier_v3.pkl and tray_classifier_v2.pkl
+  - Version/model info shown in health check
+
 Author: Claude (for Ed)
-Date: 2026-04-04
+Date: 2026-04-07
 Version: 13
 """
 
@@ -35,33 +40,6 @@ app = Flask(__name__)
 # In-memory storage
 MODELS = {"board_classifier": None, "tray_classifier": None}
 WORDLIST = None
-
-def auto_load_models():
-    """Load models and wordlist from disk if present (baked into container)."""
-    global WORDLIST
-    import os
-    base = "/app" if os.path.isdir("/app") else "."
-    for name, filename in [("board_classifier", "board_classifier_v2.pkl"),
-                           ("tray_classifier", "tray_classifier_v1.pkl")]:
-        path = os.path.join(base, filename)
-        if os.path.exists(path) and MODELS[name] is None:
-            try:
-                with open(path, "rb") as f:
-                    MODELS[name] = pickle.load(f)
-                print(f"Auto-loaded {name} from {path}")
-            except Exception as e:
-                print(f"Failed to auto-load {name}: {e}")
-    wl_path = os.path.join(base, "NWL23.txt")
-    if os.path.exists(wl_path) and WORDLIST is None:
-        try:
-            with open(wl_path, "r", encoding="utf-8", errors="ignore") as f:
-                WORDLIST = {line.strip().upper() for line in f
-                           if line.strip().isalpha() and 2 <= len(line.strip()) <= 15}
-            print(f"Auto-loaded wordlist: {len(WORDLIST)} words")
-        except Exception as e:
-            print(f"Failed to auto-load wordlist: {e}")
-
-auto_load_models()
 
 # Crossplay tile values — Protocol v34 Appendix F
 TILE_VALUES = {
@@ -88,6 +66,9 @@ BONUS_LAYOUT = [
     ["","2W","","","","","3L","","3L","","","","","2W",""],
     ["3L","","3W","","","","","2L","","","","","3W","","3L"],
 ]
+
+# Cell resize for board classifier v3 (must match training)
+BOARD_CELL_SIZE = (60, 60)
 
 # ============================================================
 # Feature extraction (must match training exactly — 14 features)
@@ -179,7 +160,7 @@ def detect_board_and_tray(img):
         for c in range(15):
             cx1 = int(x1+c*cw); cy1 = int(y1+r*ch_px)
             cell = img.crop((cx1, cy1, int(cx1+cw), int(cy1+ch_px)))
-            f = np.array([extract_features(cell)])
+            f = np.array([extract_features(cell.resize(BOARD_CELL_SIZE, Image.LANCZOS))])
             pred = clf.predict(scaler.transform(f))[0]
             cell_types[r][c] = pred
             if pred == "T":
@@ -386,7 +367,7 @@ input[type=file]{display:none}
   <button class="btn" onclick="revalidate()">Re-validate</button>
   <button class="btn" onclick="resetAll()">New Screenshot</button>
 </div>
-<p class="help">Correct any ? or wrong letters above, then tap Re-validate. Solver module coming in next update.</p>
+<p class="help">Correct any ? or wrong letters above, then tap Re-validate. Solver module coming in v13.</p>
 </div>
 
 <script>
